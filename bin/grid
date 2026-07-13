@@ -24,7 +24,8 @@ EOF
 }
 
 COLS=${1:-3}; ROWS=${2:-3}; CMD=${3:-alacritty}
-S=1; WS=6
+S=0.15
+WS=6
 
 die()  { echo "grid: $*" >&2; exit 1; }
 require_positive_int() { [[ $2 =~ ^[1-9][0-9]*$ ]] || die "$1 must be a positive integer"; }

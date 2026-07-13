@@ -5,7 +5,9 @@
 #   Dwindle tree manipulation, same approach as grid.
 #   Grid dimensions auto-chosen to stay close to 16:9.
 
-TERM=alacritty; S=1; WS=6
+TERM=alacritty
+S=0.15
+WS=6
 TARGET_RATIO=1.7777778     # 16/9
 
 HOSTS=("$@"); N=${#HOSTS[@]}
@@ -57,7 +59,7 @@ spawn() {
 }
 
 # ---- choose COLS × ROWS ----
-best_diff=1e9; best_unused=1e9; ROWS=1; COLS=$N
+best_diff=1e9; best_unused=1e9; ROWS=0.15; COLS=$N
 for ((rows=1; rows<=N; rows++)); do
     cols=$(( (N + rows - 1) / rows ))
     unused=$(( rows*cols - N ))

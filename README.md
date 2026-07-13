@@ -27,7 +27,11 @@ All spawn logic lives in `grid`. `grid-ssh` wraps it with host→SSH-command tra
 3. **Build rows:** for each column, split the top window repeatedly — all rows equal height.
 4. **Restore** `input:follow_mouse`.
 
-No focus navigation needed — after `resizeactive`, focus returns to the left/top window naturally (with sufficient sleep between actions).
+No focus navigation needed — after `resizeactive`, focus returns to the left/top window naturally.
+
+Default sleep between actions: `S=0.15` seconds (minimum safe value for Hyprland 0.55; fails at ≤0.10 on 6×6).
+
+Tested layouts: 2×2, 3×2, 4×2, 5×2, 3×3, 6×6 — all equal within 5px.
 
 ## Scripts
 

@@ -1,111 +1,93 @@
 #!/usr/bin/env bash
-# hypr-grid.sh – spawn one Alacritty-SSH terminal per host in a balanced grid
-# usage:  hypr-grid.sh  host1 host2 …
-# notes :  • hard-wired to workspace 9
-#          • empty panes get a plain shell
-#          • grid chosen to minimise |aspect-ratio – 16:9|, then empty tiles
+#   grid-ssh – spawn one SSH terminal per host in a balanced grid
+#   usage:  grid-ssh host1 host2 …
+#
+#   Dwindle tree manipulation, same approach as grid.
+#   Grid dimensions auto-chosen to stay close to 16:9.
 
-############################################
-# settings                                 #
-############################################
-#WS=9
-TERMINAL=alacritty
-DELAY=0.18                 # tune if windows map too slowly
+TERM=alacritty; S=1; WS=6
 TARGET_RATIO=1.7777778     # 16/9
 
-RESERVED_LEFT=0
-RESERVED_TOP=0
-RESERVED_RIGHT=0
-RESERVED_BOTTOM=0
+HOSTS=("$@"); N=${#HOSTS[@]}
 
-die() {
-    echo "grid-ssh: $*" >&2
-    exit 1
+[[ $1 == --help || $1 == -h || $N -eq 0 ]] && {
+    cat <<'EOF'
+Usage: grid-ssh HOST...
+
+Spawn one tiled alacritty terminal per host, each running an SSH session.
+Grid dimensions chosen automatically to stay close to 16:9 while
+minimizing empty panes.  Empty panes get a plain terminal.
+
+Examples:
+  grid-ssh web1 web2 web3
+  grid-ssh 192.168.1.10 192.168.1.11
+EOF
+    ((N==0)) && exit 1; exit 0
 }
 
-load_reserved_area() {
-    local monitor reserved
-
-    command -v jq >/dev/null || die "jq is required"
-    monitor=$(hyprctl -j activeworkspace | jq -r '.monitor')
-    [[ -n $monitor && $monitor != null ]] || die "could not determine active monitor"
-
-    reserved=$(hyprctl -j monitors \
-        | jq -r --arg monitor "$monitor" '.[] | select(.name == $monitor) | .reserved | @tsv')
-    [[ -n $reserved ]] || die "could not read monitor reserved area for $monitor"
-
-    read -r RESERVED_LEFT RESERVED_TOP RESERVED_RIGHT RESERVED_BOTTOM <<< "$reserved"
-}
-
-grid_rule() {
-    local col=$1 row=$2
-    local usable_w usable_h cell_w cell_h cell_x cell_y
-
-    usable_w="(monitor_w-${RESERVED_LEFT}-${RESERVED_RIGHT})"
-    usable_h="(monitor_h-${RESERVED_TOP}-${RESERVED_BOTTOM})"
-    cell_w="(${usable_w}/${COLS})"
-    cell_h="(${usable_h}/${ROWS})"
-    cell_x="(${RESERVED_LEFT}+(${usable_w}*${col}/${COLS}))"
-    cell_y="(${RESERVED_TOP}+(${usable_h}*${row}/${ROWS}))"
-
-    printf '[float; size %s %s; move %s %s]' "$cell_w" "$cell_h" "$cell_x" "$cell_y"
-}
-
-############################################
-# hosts from CLI                           #
-############################################
-HOSTS=("$@")
-N=${#HOSTS[@]}
-(( N == 0 )) && { echo "Usage: $0 host1 host2 …" >&2; exit 1; }
-
-############################################
-# choose COLS × ROWS                       #
-############################################
-best_diff=1e9
-best_unused=1e9
-ROWS=1
-COLS=$N
-
-for ((rows=1; rows<=N; rows++)); do
-    cols=$(( (N + rows - 1) / rows ))          # ceil(N / rows)
-    unused=$(( rows*cols - N ))
-    ratio=$(awk -v c="$cols" -v r="$rows" 'BEGIN{print c/r}')
-    diff=$(awk -v a="$ratio" -v b="$TARGET_RATIO" 'BEGIN{print (a>b?a-b:b-a)}')
-
-    if  (( $(awk "BEGIN{print ($diff < $best_diff - 1e-6)}") )) || \
-        { [[ "$diff" == "$best_diff" ]] && (( unused < best_unused )); }; then
-        best_diff=$diff
-        best_unused=$unused
-        ROWS=$rows
-        COLS=$cols
+adj() {
+    local dim=$1 L=$2 R=$3 dpct
+    dpct=$(awk -v L="$L" -v R="$R" 'BEGIN{printf "%.0f", (2*R/(L+R)-1)*100}')
+    if (( $(awk -v d="$dpct" 'BEGIN{print (d<-0.5?1:0)}') )); then
+        ((dim==0)) && hyprctl dispatch resizeactive "${dpct}%" 0 \
+                    || hyprctl dispatch resizeactive 0 "${dpct}%"
     fi
-done
+}
 
-############################################
-# helpers                                  #
-############################################
-spawn() {                                      # $1 = global index
-    local col row host_q cmd
+build_dim() {
+    local N=$1 dim=$2 presel
+    ((dim==0)) && presel=r || presel=d
 
-    col=$(($1 % COLS))
-    row=$(($1 / COLS))
+    for ((c=2; c<=N; c++)); do
+        local L=$((N - c + 1)) R=1
+        hyprctl dispatch layoutmsg "preselect $presel"; sleep "$S"
+        spawn; sleep "$S"
+        adj "$dim" "$L" "$R"; sleep "$S"
+    done
+}
 
-    if (( $1 < N )); then
-        printf -v host_q '%q' "${HOSTS[$1]}"
-        cmd="$TERMINAL --command ssh $host_q"
+spawn() {
+    if (( idx < N )); then
+        printf -v host_q '%q' "${HOSTS[$idx]}"
+        hyprctl dispatch exec "$TERM --command ssh $host_q"
     else
-        cmd="$TERMINAL"
+        hyprctl dispatch exec "$TERM"
     fi
-
-    hyprctl dispatch exec "$(grid_rule "$col" "$row") $cmd"
+    ((idx++))
 }
 
-############################################
-# build grid                               #
-############################################
-#hyprctl dispatch workspace "$WS"
-load_reserved_area
-
-for ((idx=0; idx<COLS*ROWS; idx++)); do
-    spawn "$idx"; sleep "$DELAY"
+# ---- choose COLS × ROWS ----
+best_diff=1e9; best_unused=1e9; ROWS=1; COLS=$N
+for ((rows=1; rows<=N; rows++)); do
+    cols=$(( (N + rows - 1) / rows ))
+    unused=$(( rows*cols - N ))
+    ratio_cr=$(awk -v c="$cols" -v r="$rows" 'BEGIN{print c/r}')
+    diff=$(awk -v a="$ratio_cr" -v b="$TARGET_RATIO" 'BEGIN{print (a>b?a-b:b-a)}')
+    if (( $(awk "BEGIN{print ($diff < $best_diff - 1e-6)}") )) || \
+       { [[ "$diff" == "$best_diff" ]] && (( unused < best_unused )); }; then
+        best_diff=$diff; best_unused=$unused; ROWS=$rows; COLS=$cols
+    fi
 done
+
+# ---- workspace prep ----
+hyprctl dispatch workspace "$WS"; sleep "$S"
+hyprctl clients -j | jq -r '.[] | select(.workspace.id=='$WS').address' | while read -r a; do
+    [[ -n $a ]] && hyprctl dispatch killwindow "address:$a"
+done
+
+hyprctl keyword dwindle:force_split 2
+hyprctl keyword dwindle:preserve_split true
+hyprctl keyword dwindle:default_split_ratio 1
+hyprctl keyword input:follow_mouse 0
+
+# ---- build ----
+idx=0
+spawn; sleep "$S"
+build_dim "$COLS" 0
+
+for ((col=0; col<COLS; col++)); do
+    ((ROWS>1)) && build_dim "$ROWS" 1
+    ((col+1<COLS)) && { hyprctl dispatch movefocus r; sleep "$S"; }
+done
+
+hyprctl keyword input:follow_mouse 1

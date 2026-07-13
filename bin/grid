@@ -1,71 +1,74 @@
 #!/usr/bin/env bash
-#   hypr-grid.sh  –  spawn an arbitrary N×M terminal grid
-#   usage:  hypr-grid.sh  <cols> <rows>  [workspace] [cmd]
-#   e.g.:   hypr-grid.sh 5 3 10 foot
-#   default: 3×3 on WS 9 with alacritty
+#   grid  –  spawn an N×M tiled terminal grid in Hyprland
+#   usage:  grid  [cols] [rows]  [cmd]
+#   default: 3×3 with alacritty
+#
+#   Always splits the leftmost/topmost window. After each exec+resize,
+#   focus returns to position 0 — no navigation needed.
+#   No floating.  Workspace 6.
 
-COLS=${1:-3}
-ROWS=${2:-3}
-#WS=${3:-9}
-CMD=${4:-alacritty}
-DELAY=0.18              # give Hyprland time to map each window
+[[ $1 == --help || $1 == -h ]] && {
+    cat <<'EOF'
+Usage: grid [COLS] [ROWS] [CMD]
 
-RESERVED_LEFT=0
-RESERVED_TOP=0
-RESERVED_RIGHT=0
-RESERVED_BOTTOM=0
+Spawn a COLS × ROWS grid of tiled terminal windows in Hyprland.
+Windows are regular tiled — keyboard navigation/resize works.
 
-die() {
-    echo "grid: $*" >&2
-    exit 1
+Arguments:
+  COLS  Columns (default: 3)    ROWS  Rows (default: 3)
+  CMD   Terminal command (default: alacritty)
+
+Examples:  grid | grid 5 2 foot | grid 4 3 "alacritty -e htop"
+EOF
+    exit 0
 }
 
-require_positive_int() {
-    [[ $2 =~ ^[1-9][0-9]*$ ]] || die "$1 must be a positive integer"
+COLS=${1:-3}; ROWS=${2:-3}; CMD=${3:-alacritty}
+S=1; WS=6
+
+die()  { echo "grid: $*" >&2; exit 1; }
+require_positive_int() { [[ $2 =~ ^[1-9][0-9]*$ ]] || die "$1 must be a positive integer"; }
+require_positive_int cols "$COLS"; require_positive_int rows "$ROWS"
+
+adj() {
+    local dim=$1 L=$2 R=$3 dpct
+    dpct=$(awk -v L="$L" -v R="$R" 'BEGIN{printf "%.0f", (2*R/(L+R)-1)*100}')
+    if (( $(awk -v d="$dpct" 'BEGIN{print (d<-0.5?1:0)}') )); then
+        ((dim==0)) && hyprctl dispatch resizeactive "${dpct}%" 0 \
+                    || hyprctl dispatch resizeactive 0 "${dpct}%"
+    fi
 }
 
-load_reserved_area() {
-    local monitor reserved
+build_dim() {
+    local N=$1 dim=$2 presel
+    ((dim==0)) && presel=r || presel=d
 
-    command -v jq >/dev/null || die "jq is required"
-    monitor=$(hyprctl -j activeworkspace | jq -r '.monitor')
-    [[ -n $monitor && $monitor != null ]] || die "could not determine active monitor"
-
-    reserved=$(hyprctl -j monitors \
-        | jq -r --arg monitor "$monitor" '.[] | select(.name == $monitor) | .reserved | @tsv')
-    [[ -n $reserved ]] || die "could not read monitor reserved area for $monitor"
-
-    read -r RESERVED_LEFT RESERVED_TOP RESERVED_RIGHT RESERVED_BOTTOM <<< "$reserved"
+    for ((c=2; c<=N; c++)); do
+        local L=$((N - c + 1)) R=1
+        hyprctl dispatch layoutmsg "preselect $presel"; sleep "$S"
+        hyprctl dispatch exec "$CMD"; sleep "$S"
+        adj "$dim" "$L" "$R"; sleep "$S"
+    done
 }
 
-grid_rule() {
-    local col=$1 row=$2
-    local usable_w usable_h cell_w cell_h cell_x cell_y
-
-    usable_w="(monitor_w-${RESERVED_LEFT}-${RESERVED_RIGHT})"
-    usable_h="(monitor_h-${RESERVED_TOP}-${RESERVED_BOTTOM})"
-    cell_w="(${usable_w}/${COLS})"
-    cell_h="(${usable_h}/${ROWS})"
-    cell_x="(${RESERVED_LEFT}+(${usable_w}*${col}/${COLS}))"
-    cell_y="(${RESERVED_TOP}+(${usable_h}*${row}/${ROWS}))"
-
-    printf '[float; size %s %s; move %s %s]' "$cell_w" "$cell_h" "$cell_x" "$cell_y"
-}
-
-spawn_cell() {
-    local idx=$1
-    local col row
-
-    col=$((idx % COLS))
-    row=$((idx / COLS))
-    hyprctl dispatch exec "$(grid_rule "$col" "$row") $CMD"
-    sleep "$DELAY"
-}
-
-require_positive_int cols "$COLS"
-require_positive_int rows "$ROWS"
-load_reserved_area
-
-for ((idx=0; idx<COLS*ROWS; idx++)); do
-    spawn_cell "$idx"
+# workspace prep
+hyprctl dispatch workspace "$WS"; sleep "$S"
+hyprctl clients -j | jq -r '.[] | select(.workspace.id=='$WS').address' | while read -r a; do
+    [[ -n $a ]] && hyprctl dispatch killwindow "address:$a"
 done
+
+hyprctl keyword dwindle:force_split 2
+hyprctl keyword dwindle:preserve_split true
+hyprctl keyword dwindle:default_split_ratio 1
+hyprctl keyword input:follow_mouse 0
+
+# seed + build columns, then rows
+hyprctl dispatch exec "$CMD"; sleep "$S"
+build_dim "$COLS" 0
+
+for ((col=0; col<COLS; col++)); do
+    ((ROWS>1)) && build_dim "$ROWS" 1
+    ((col+1<COLS)) && { hyprctl dispatch movefocus r; sleep "$S"; }
+done
+
+hyprctl keyword input:follow_mouse 1

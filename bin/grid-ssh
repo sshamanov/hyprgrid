@@ -7,7 +7,6 @@
 
 TERM=alacritty
 S=0.15
-WS=6
 TARGET_RATIO=1.7777778     # 16/9
 
 HOSTS=("$@"); N=${#HOSTS[@]}
@@ -71,11 +70,13 @@ for ((rows=1; rows<=N; rows++)); do
     fi
 done
 
-# ---- workspace prep ----
-hyprctl dispatch workspace "$WS"; sleep "$S"
-hyprctl clients -j | jq -r '.[] | select(.workspace.id=='$WS').address' | while read -r a; do
-    [[ -n $a ]] && hyprctl dispatch killwindow "address:$a"
-done
+# ---- workspace check ----
+WS=$(hyprctl -j activeworkspace | jq -r '.id')
+TILED=$(hyprctl -j clients | jq -r '[.[] | select(.workspace.id == '$WS' and .floating == false)] | length')
+if (( TILED > 0 )); then
+    echo "grid-ssh: workspace $WS has $TILED tiled windows — run on empty workspace" >&2
+    exit 1
+fi
 
 hyprctl keyword dwindle:force_split 2
 hyprctl keyword dwindle:preserve_split true

@@ -18,7 +18,7 @@ All spawn logic lives in `grid`. `grid-ssh` wraps it with host→SSH-command tra
 
 ## How it works
 
-1. **Prep:** switch to workspace 6, clear it, set dwindle options:
+1. **Prep:** verify current workspace is empty (no tiled windows), set dwindle options:
    - `force_split 2` — always split right/bottom
    - `preserve_split true` — keep direction after resize
    - `focus_on_activate` broken in Hyprland 0.55, so focus stays on new window
@@ -57,7 +57,7 @@ Read hosts from `$HOME/.ssh/hosts`, filter by pattern, pipe to `grid-ssh`.
 
 - Hyprland ≥ 0.55, `hyprctl`, `jq`, `awk`
 - `alacritty` (default), `ssh` (grid-ssh)
-- Configurable: set `S` (sleep) and `WS` (workspace) at top of scripts
+- Configurable: set `S` (sleep) at top of scripts. Runs on current workspace — must be empty (no tiled windows).
 
 ## Testing
 

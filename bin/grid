@@ -5,7 +5,7 @@
 #
 #   Always splits the leftmost/topmost window. After each exec+resize,
 #   focus returns to position 0 — no navigation needed.
-#   No floating.  Workspace 6.
+#   No floating.  Runs on current (must be empty) workspace.
 
 [[ $1 == --help || $1 == -h ]] && {
     cat <<'EOF'
@@ -25,7 +25,6 @@ EOF
 
 COLS=${1:-3}; ROWS=${2:-3}; CMD=${3:-alacritty}
 S=0.15
-WS=6
 
 die()  { echo "grid: $*" >&2; exit 1; }
 require_positive_int() { [[ $2 =~ ^[1-9][0-9]*$ ]] || die "$1 must be a positive integer"; }
@@ -52,11 +51,12 @@ build_dim() {
     done
 }
 
-# workspace prep
-hyprctl dispatch workspace "$WS"; sleep "$S"
-hyprctl clients -j | jq -r '.[] | select(.workspace.id=='$WS').address' | while read -r a; do
-    [[ -n $a ]] && hyprctl dispatch killwindow "address:$a"
-done
+# workspace check: abort if non-floating windows on current workspace
+WS=$(hyprctl -j activeworkspace | jq -r '.id')
+TILED=$(hyprctl -j clients | jq -r '[.[] | select(.workspace.id == '$WS' and .floating == false)] | length')
+if (( TILED > 0 )); then
+    die "workspace $WS has $TILED tiled windows — run on an empty workspace"
+fi
 
 hyprctl keyword dwindle:force_split 2
 hyprctl keyword dwindle:preserve_split true

@@ -2,7 +2,7 @@
 
 Hyprland scripts for spawning tiled terminal grids — literal N×M matrices of equal-size windows via dwindle tree manipulation. No floating.
 
-![screenshot](20260617_19h15m51s_grim.png)
+![screenshot](20260714_00h33m42s_grim.png)
 
 ## Architecture
 

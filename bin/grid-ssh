@@ -58,7 +58,7 @@ spawn() {
 }
 
 # ---- choose COLS × ROWS ----
-best_diff=1e9; best_unused=1e9; ROWS=0.15; COLS=$N
+best_diff=1e9; best_unused=1e9; ROWS=1; COLS=$N
 for ((rows=1; rows<=N; rows++)); do
     cols=$(( (N + rows - 1) / rows ))
     unused=$(( rows*cols - N ))

@@ -36,11 +36,11 @@ adj() {
 }
 
 build_dim() {
-    local N=$1 dim=$2 presel
+    local count=$1 dim=$2 presel
     ((dim==0)) && presel=r || presel=d
 
-    for ((c=2; c<=N; c++)); do
-        local L=$((N - c + 1)) R=1
+    for ((c=2; c<=count; c++)); do
+        local L=$((count - c + 1)) R=1
         hyprctl dispatch layoutmsg "preselect $presel"; sleep "$S"
         spawn; sleep "$S"
         adj "$dim" "$L" "$R"; sleep "$S"
@@ -58,14 +58,15 @@ spawn() {
 }
 
 # ---- choose COLS × ROWS ----
-best_diff=1e9; best_unused=1e9; ROWS=1; COLS=$N
+best_diff=999999; best_unused=999999; ROWS=1; COLS=$N
 for ((rows=1; rows<=N; rows++)); do
     cols=$(( (N + rows - 1) / rows ))
     unused=$(( rows*cols - N ))
     ratio_cr=$(awk -v c="$cols" -v r="$rows" 'BEGIN{print c/r}')
     diff=$(awk -v a="$ratio_cr" -v b="$TARGET_RATIO" 'BEGIN{print (a>b?a-b:b-a)}')
-    if (( $(awk "BEGIN{print ($diff < $best_diff - 1e-6)}") )) || \
-       { [[ "$diff" == "$best_diff" ]] && (( unused < best_unused )); }; then
+    # prefer fewer unused cells, then closer to 16:9
+    if (( unused < best_unused )) || \
+       { (( unused == best_unused )) && (( $(awk -v d="$diff" -v b="$best_diff" 'BEGIN{print (d < b - 0.000001 ? 1 : 0)}') )); }; then
         best_diff=$diff; best_unused=$unused; ROWS=$rows; COLS=$cols
     fi
 done

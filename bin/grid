@@ -15,7 +15,8 @@
 #   Speed: no fixed sleeps.  focus/preselect are synchronous; animations are
 #   disabled for the build (so sizes snap, no settle window); the only real
 #   waits are polled: window MAP after each exec, and geometry STABILITY after
-#   each resize.  Prior config is restored on exit (even on Ctrl-C).
+#   each resize.  Declared config-file values are restored on exit (even on
+#   Ctrl-C) — never the live values, which external tools may have mutated.
 #   window.resize({..., relative=true}) drags the split border by pixels; focus
 #   stays on the resized window (no auto return), so refocus the persistent
 #   seed / band window by address before every split.
@@ -64,10 +65,27 @@ if (( TILED > 0 )); then
     die "workspace $WS has $TILED tiled windows — run on an empty workspace"
 fi
 
-# ---- build config: follow_mouse 0 + animations off; restore prior on exit ----
-anim_prev=$(hyprctl -j getoption animations:enabled | jq -r '.bool')
-fm_prev=$(hyprctl -j getoption input:follow_mouse | jq -r '.int')
-restore_cfg() { hyprctl eval "hl.config({ input = { follow_mouse = $fm_prev }, animations = { enabled = $anim_prev } })" >/dev/null 2>&1; }
+# ---- build config: follow_mouse 0 + animations off during build ----
+# On exit restore the values the CONFIG FILE declares — not the live values,
+# which another tool (or an interrupted earlier run) may have mutated; restoring
+# those would just cement the drift.  Parse hyprland.lua/hyprland.conf and fall
+# back to Hyprland's built-in defaults (follow_mouse=1, animations.enabled=true)
+# if the file can't be read.
+CFG_FILE=
+for _cfg in "${XDG_CONFIG_HOME:-$HOME/.config}/hypr/hyprland.lua" "$HOME/.config/hypr/hyprland.conf"; do
+    [[ -f $_cfg ]] && { CFG_FILE=$_cfg; break; }
+done
+fm_cfg=1; anim_cfg=true     # Hyprland built-in defaults
+if [[ -n $CFG_FILE ]]; then
+    fm_cfg=$(sed -n 's/.*follow_mouse[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$CFG_FILE" | head -1)
+    anim_cfg=$(awk '
+        function netb(l){ n=0; for(i=1;i<=length(l);i++){c=substr(l,i,1); if(c=="{")n++; else if(c=="}")n--} return n }
+        { if(!on){ if($0 ~ /animations[[:space:]]*=/) { on=1; d=netb($0); if(d<=0)on=0; next } }
+          else { if(match($0,/enabled[[:space:]]*=[[:space:]]*(true|false)/)){ print (substr($0,RSTART,RLENGTH) ~ /true/) ? "true":"false"; exit }
+                 d += netb($0); if(d<=0) on=0 } }' "$CFG_FILE")
+    fm_cfg=${fm_cfg:-1}; anim_cfg=${anim_cfg:-true}
+fi
+restore_cfg() { hyprctl eval "hl.config({ input = { follow_mouse = $fm_cfg }, animations = { enabled = $anim_cfg } })" >/dev/null 2>&1; }
 trap restore_cfg EXIT
 hyprctl eval 'hl.config({ input = { follow_mouse = 0 }, animations = { enabled = false } })' >/dev/null
 

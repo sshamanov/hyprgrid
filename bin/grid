@@ -6,11 +6,16 @@
 #   Hyprland 0.56 (Lua config).  All hyprctl dispatch/keyword are Lua-evaluated:
 #     dispatch -> hl.dispatch(expr),  runtime options -> eval 'hl.config({...})'.
 #
-#   Equal-grid build (validated 2×2…5×3 within ~2px on Hyprland 0.56.2):
+#   Equal-grid build (validated 2×2…6×6, ≤3px):
 #     1. bands: split the seed full-width window downward ROWS-1 times, each time
 #        shrinking the new bottom band so all ROWS end at 1/ROWS height.
 #     2. columns: for every band, split its window rightward COLS-1 times,
 #        shrinking each new right cell so all COLS end at 1/COLS width.
+#
+#   Speed: no fixed sleeps.  focus/preselect are synchronous; animations are
+#   disabled for the build (so sizes snap, no settle window); the only real
+#   waits are polled: window MAP after each exec, and geometry STABILITY after
+#   each resize.  Prior config is restored on exit (even on Ctrl-C).
 #   window.resize({..., relative=true}) drags the split border by pixels; focus
 #   stays on the resized window (no auto return), so refocus the persistent
 #   seed / band window by address before every split.
@@ -33,7 +38,6 @@ EOF
 }
 
 COLS=${1:-3}; ROWS=${2:-3}; CMD=${3:-alacritty}
-S=0.22     # sleep after every dispatch (Hyprland 0.56 Lua parser)
 
 die()  { echo "grid: $*" >&2; exit 1; }
 require_positive_int() { [[ $2 =~ ^[1-9][0-9]*$ ]] || die "$1 must be a positive integer"; }
@@ -45,44 +49,76 @@ lua_str() { local s=$1; s=${s//\\/\\\\}; s=${s//\"/\\\"}; printf '"%s"' "$s"; }
 # every dispatch is a lua expression evaluated as hl.dispatch(<expr>)
 dsp() { hyprctl dispatch "$1" >/dev/null; }
 
-exec_cmd()   { dsp "hl.dsp.exec_cmd($(lua_str "$1"))"; sleep "$S"; }
-layoutmsg()  { dsp "hl.dsp.layout($(lua_str "$1"))"; sleep "$S"; }
-focus_addr() { dsp "hl.dsp.focus({ window = \"address:$1\" })"; sleep "$S"; }
-# relative resize drags the split border by pixel delta; with focus on the
-# freshly spawned right/bottom child, a positive drag shrinks that child.
-resize_rel() { dsp "hl.dsp.window.resize({ x = $1, y = $2, relative = true })"; sleep "$S"; }
+ex()  { dsp "hl.dsp.exec_cmd($(lua_str "$CMD"))"; }
+lm()  { dsp "hl.dsp.layout($(lua_str "$1"))"; }
+fa()  { dsp "hl.dsp.focus({ window = \"address:$1\" })"; }
+rr()  { dsp "hl.dsp.window.resize({ x = $1, y = $2, relative = true })"; }
 
-active_info() { hyprctl -j activewindow | jq -r '"\(.size[0]) \(.size[1]) \(.address)"'; }
+WS=$(hyprctl -j activeworkspace | jq -r '.id')
+cnt() { hyprctl -j clients | jq "[.[]|select(.workspace.id==$WS)]|length"; }
+act() { hyprctl -j activewindow | jq -r '"\(.size[0]) \(.size[1]) \(.address)"'; }
 
 # workspace check: abort if non-floating windows on current workspace
-WS=$(hyprctl -j activeworkspace | jq -r '.id')
 TILED=$(hyprctl -j clients | jq -r '[.[] | select(.workspace.id == '$WS' and .floating == false)] | length')
 if (( TILED > 0 )); then
     die "workspace $WS has $TILED tiled windows — run on an empty workspace"
 fi
 
-# follow_mouse off during the build keeps focus predictable; restored at end.
-hyprctl eval 'hl.config({ input = { follow_mouse = 0 } })' >/dev/null
+# ---- build config: follow_mouse 0 + animations off; restore prior on exit ----
+anim_prev=$(hyprctl -j getoption animations:enabled | jq -r '.bool')
+fm_prev=$(hyprctl -j getoption input:follow_mouse | jq -r '.int')
+restore_cfg() { hyprctl eval "hl.config({ input = { follow_mouse = $fm_prev }, animations = { enabled = $anim_prev } })" >/dev/null 2>&1; }
+trap restore_cfg EXIT
+hyprctl eval 'hl.config({ input = { follow_mouse = 0 }, animations = { enabled = false } })' >/dev/null
+
+# ---- adaptive waits ----
+# wait until window #(prev+1) mapped AND it grabbed focus (active != the window
+# we split).  exec spawns are the variable-latency step (terminal startup).
+wait_map() { # prev_total old_active
+    local prev=$1 old=$2 expect=$((prev + 1)) i c a
+    for ((i=0; i<300; i++)); do
+        c=$(cnt)
+        if (( c >= expect )); then
+            a=$(hyprctl -j activewindow | jq -r '.address')
+            [[ -n $a && $a != "$old" ]] && return 0
+        fi
+        sleep 0.005
+    done
+    echo "grid: window map timeout (expected #$expect)" >&2
+    return 1
+}
+# wait until active geometry is stable across two reads (border/relayout done)
+wait_stable() {
+    local i a b
+    for ((i=0; i<50; i++)); do
+        a=$(act); sleep 0.03; b=$(act)
+        [[ $a == "$b" ]] && return 0
+    done
+    echo "grid: geometry not stable" >&2
+    return 1
+}
 
 # shrink the ACTIVE (just-spawned) child so the remaining region splits 1/N.
 # dim 0 = columns (use width), dim 1 = bands/rows (use height).  dpct < 0.
 adj() {
     local dim=$1 L=$2 R=$3 w h addr delta dpct
-    read -r w h addr <<<"$(active_info)"
+    read -r w h addr <<<"$(act)"
     dpct=$(awk -v L="$L" -v R="$R" 'BEGIN{printf "%.1f", (2*R/(L+R)-1)*100}')
     if awk -v d="$dpct" 'BEGIN{exit !(d < -0.5)}'; then
         if (( dim == 0 )); then
             delta=$(awk -v s="$w" -v d="$dpct" 'BEGIN{printf "%.0f", s*(-d)/100}')
-            resize_rel "$delta" 0
+            rr "$delta" 0
         else
             delta=$(awk -v s="$h" -v d="$dpct" 'BEGIN{printf "%.0f", s*(-d)/100}')
-            resize_rel 0 "$delta"
+            rr 0 "$delta"
         fi
+        wait_stable
     fi
 }
 
 # ---- seed: the top band, full width ----
-exec_cmd "$CMD"
+prev=$(cnt)
+ex; wait_map "$prev" ""
 seed=$(hyprctl -j activewindow | jq -r '.address')
 [[ $seed == null || -z $seed ]] && die "no active window after seed spawn"
 
@@ -90,10 +126,10 @@ seed=$(hyprctl -j activewindow | jq -r '.address')
 bands=("$seed")
 for ((r=2; r<=ROWS; r++)); do
     L=$((ROWS - r + 1)); R=1
-    focus_addr "$seed"
-    layoutmsg "preselect d"
-    exec_cmd "$CMD"
-    bands+=("$(hyprctl -j activewindow | jq -r '.address')")
+    fa "$seed"; lm "preselect d"
+    prev=$(cnt); ex; wait_map "$prev" "$seed"; wait_stable
+    new=$(hyprctl -j activewindow | jq -r '.address')
+    bands+=("$new")
     adj 1 "$L" "$R"
 done
 
@@ -101,11 +137,8 @@ done
 for b in "${bands[@]}"; do
     for ((c=2; c<=COLS; c++)); do
         L=$((COLS - c + 1)); R=1
-        focus_addr "$b"
-        layoutmsg "preselect r"
-        exec_cmd "$CMD"
+        fa "$b"; lm "preselect r"
+        prev=$(cnt); ex; wait_map "$prev" "$b"; wait_stable
         adj 0 "$L" "$R"
     done
 done
-
-hyprctl eval 'hl.config({ input = { follow_mouse = 1 } })' >/dev/null

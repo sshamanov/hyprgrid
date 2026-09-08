@@ -26,9 +26,10 @@ The user runs **hyprland.lua**, not hyprlang. hyprctl is now Lua-evaluated — e
 Dispatch semantics to remember:
 
 - Any bare word in a dispatch is parsed as Lua → `')' expected near 'X'`. All strings must be quoted (helper `lua_str`). A dispatch is just `hl.dispatch(<your-lua-expr>)`.
+- **One dispatch = exactly one operation.** Dispatcher constructors (`hl.dsp.*`) do NOT execute on construction; only the single value returned by the expression is run, so you cannot chain ops in one `hyprctl dispatch` (a `;` at top level is a parse error, and `hl.dsp.exec_cmd("a"), hl.dsp.exec_cmd("b")` spawns only one window). Each op is its own hyprctl round-trip.
 - `window.resize` numeric args **without** `relative` are ABSOLUTE sizes (negative → "Invalid size"). With `relative = true` it drags the split border by a pixel delta; positive shrinks the freshly-spawned right/bottom child. 0.55's integer-percent behavior is gone — deltas are computed in px.
 - **Focus does NOT auto-return to pos 0 after a resize** (unlike 0.55 `resizeactive`). You must `focus({window="address:…"})` the persistent seed/band window before every split.
-- Minimum sleep after a dispatch: `S=0.11`; the rewritten scripts use `S=0.22`.
+- **Pacing — no fixed sleeps.** `focus`/`preselect` are synchronous and need no wait. Only two steps are genuinely async, and both are **polled adaptively**: after `exec` wait for the window to map + grab focus (`wait_map`), after `window.resize` wait until geometry is stable across two reads (`wait_stable`). Set `animations.enabled=false` for the build so sizes snap (a fixed sleep was only needed to out-wait open animations); restore prior `input:follow_mouse` + `animations.enabled` via `getoption` + a `trap`. ~4× faster: 3×3 in ~1.9 s, 4×4 ~3.4 s, 6×6 ~8 s, geometry ≤3px. (`getoption` works under the Lua config and returns `{bool}`/`{int}`.)
 
 ## Equal-grid build (validated 2×2…5×3, 6×6; ≤3px on 0.56.2)
 
@@ -57,8 +58,7 @@ Dispatch semantics to remember:
 
 ## Working Rules
 
-- `S` configurable at script top. Current default: `0.22`.
-- Every `hyprctl dispatch` must have `sleep "$S"` after it. No exceptions.
+- No fixed sleeps. Sync ops (`focus`, `preselect`) are un-paced; async ops are adaptively polled (`wait_map` after exec, `wait_stable` after resize). Keep the generous poll caps as a safety net.
 - Windows are tiled — never use `[float]` rules.
 - Grid runs on current workspace. Aborts if non-floating windows exist.
 - Test on workspace 6 only; kill everything there before each test; return to original workspace immediately. Existing `/tmp` harnesses (`hgmap.sh` for creation→cell mapping, `tsgr.sh`-style for grid-ssh placement) show the pattern: save orig ws, `follow_mouse=0` during build / `=1` after, trap-restore.
@@ -67,5 +67,5 @@ Dispatch semantics to remember:
 
 ## Tested Layouts
 
-2×2, 2×3, 3×2, 3×3, 4×2, 4×4, 5×3, 6×6 — equal within 5px. grid-ssh 3×2 host placement verified by window title (host *i* at row-major cell *i*).
+2×2, 2×3, 3×2, 3×3, 3×5, 4×2, 4×4, 5×3, 6×6 — equal within 5px with the adaptive-pacing build. grid-ssh 3×2 host placement verified by window title (host *i* at row-major cell *i*).
 

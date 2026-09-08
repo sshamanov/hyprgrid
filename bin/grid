@@ -3,8 +3,17 @@
 #   usage:  grid  [cols] [rows]  [cmd]
 #   default: 3×3 with alacritty
 #
-#   Always splits the leftmost/topmost window. After each exec+resize,
-#   focus returns to position 0 — no navigation needed.
+#   Hyprland 0.56 (Lua config).  All hyprctl dispatch/keyword are Lua-evaluated:
+#     dispatch -> hl.dispatch(expr),  runtime options -> eval 'hl.config({...})'.
+#
+#   Equal-grid build (validated 2×2…5×3 within ~2px on Hyprland 0.56.2):
+#     1. bands: split the seed full-width window downward ROWS-1 times, each time
+#        shrinking the new bottom band so all ROWS end at 1/ROWS height.
+#     2. columns: for every band, split its window rightward COLS-1 times,
+#        shrinking each new right cell so all COLS end at 1/COLS width.
+#   window.resize({..., relative=true}) drags the split border by pixels; focus
+#   stays on the resized window (no auto return), so refocus the persistent
+#   seed / band window by address before every split.
 #   No floating.  Runs on current (must be empty) workspace.
 
 [[ $1 == --help || $1 == -h ]] && {
@@ -24,32 +33,26 @@ EOF
 }
 
 COLS=${1:-3}; ROWS=${2:-3}; CMD=${3:-alacritty}
-S=0.15
+S=0.22     # sleep after every dispatch (Hyprland 0.56 Lua parser)
 
 die()  { echo "grid: $*" >&2; exit 1; }
 require_positive_int() { [[ $2 =~ ^[1-9][0-9]*$ ]] || die "$1 must be a positive integer"; }
 require_positive_int cols "$COLS"; require_positive_int rows "$ROWS"
 
-adj() {
-    local dim=$1 L=$2 R=$3 dpct
-    dpct=$(awk -v L="$L" -v R="$R" 'BEGIN{printf "%.0f", (2*R/(L+R)-1)*100}')
-    if (( $(awk -v d="$dpct" 'BEGIN{print (d<-0.5?1:0)}') )); then
-        ((dim==0)) && hyprctl dispatch resizeactive "${dpct}%" 0 \
-                    || hyprctl dispatch resizeactive 0 "${dpct}%"
-    fi
-}
+# shell string -> lua string literal
+lua_str() { local s=$1; s=${s//\\/\\\\}; s=${s//\"/\\\"}; printf '"%s"' "$s"; }
 
-build_dim() {
-    local N=$1 dim=$2 presel
-    ((dim==0)) && presel=r || presel=d
+# every dispatch is a lua expression evaluated as hl.dispatch(<expr>)
+dsp() { hyprctl dispatch "$1" >/dev/null; }
 
-    for ((c=2; c<=N; c++)); do
-        local L=$((N - c + 1)) R=1
-        hyprctl dispatch layoutmsg "preselect $presel"; sleep "$S"
-        hyprctl dispatch exec "$CMD"; sleep "$S"
-        adj "$dim" "$L" "$R"; sleep "$S"
-    done
-}
+exec_cmd()   { dsp "hl.dsp.exec_cmd($(lua_str "$1"))"; sleep "$S"; }
+layoutmsg()  { dsp "hl.dsp.layout($(lua_str "$1"))"; sleep "$S"; }
+focus_addr() { dsp "hl.dsp.focus({ window = \"address:$1\" })"; sleep "$S"; }
+# relative resize drags the split border by pixel delta; with focus on the
+# freshly spawned right/bottom child, a positive drag shrinks that child.
+resize_rel() { dsp "hl.dsp.window.resize({ x = $1, y = $2, relative = true })"; sleep "$S"; }
+
+active_info() { hyprctl -j activewindow | jq -r '"\(.size[0]) \(.size[1]) \(.address)"'; }
 
 # workspace check: abort if non-floating windows on current workspace
 WS=$(hyprctl -j activeworkspace | jq -r '.id')
@@ -58,18 +61,51 @@ if (( TILED > 0 )); then
     die "workspace $WS has $TILED tiled windows — run on an empty workspace"
 fi
 
-hyprctl keyword dwindle:force_split 2
-hyprctl keyword dwindle:preserve_split true
-hyprctl keyword dwindle:default_split_ratio 1
-hyprctl keyword input:follow_mouse 0
+# follow_mouse off during the build keeps focus predictable; restored at end.
+hyprctl eval 'hl.config({ input = { follow_mouse = 0 } })' >/dev/null
 
-# seed + build columns, then rows
-hyprctl dispatch exec "$CMD"; sleep "$S"
-build_dim "$COLS" 0
+# shrink the ACTIVE (just-spawned) child so the remaining region splits 1/N.
+# dim 0 = columns (use width), dim 1 = bands/rows (use height).  dpct < 0.
+adj() {
+    local dim=$1 L=$2 R=$3 w h addr delta dpct
+    read -r w h addr <<<"$(active_info)"
+    dpct=$(awk -v L="$L" -v R="$R" 'BEGIN{printf "%.1f", (2*R/(L+R)-1)*100}')
+    if awk -v d="$dpct" 'BEGIN{exit !(d < -0.5)}'; then
+        if (( dim == 0 )); then
+            delta=$(awk -v s="$w" -v d="$dpct" 'BEGIN{printf "%.0f", s*(-d)/100}')
+            resize_rel "$delta" 0
+        else
+            delta=$(awk -v s="$h" -v d="$dpct" 'BEGIN{printf "%.0f", s*(-d)/100}')
+            resize_rel 0 "$delta"
+        fi
+    fi
+}
 
-for ((col=0; col<COLS; col++)); do
-    ((ROWS>1)) && build_dim "$ROWS" 1
-    ((col+1<COLS)) && { hyprctl dispatch movefocus r; sleep "$S"; }
+# ---- seed: the top band, full width ----
+exec_cmd "$CMD"
+seed=$(hyprctl -j activewindow | jq -r '.address')
+[[ $seed == null || -z $seed ]] && die "no active window after seed spawn"
+
+# ---- 1) ROWS equal full-width bands ----
+bands=("$seed")
+for ((r=2; r<=ROWS; r++)); do
+    L=$((ROWS - r + 1)); R=1
+    focus_addr "$seed"
+    layoutmsg "preselect d"
+    exec_cmd "$CMD"
+    bands+=("$(hyprctl -j activewindow | jq -r '.address')")
+    adj 1 "$L" "$R"
 done
 
-hyprctl keyword input:follow_mouse 1
+# ---- 2) within each band, COLS equal columns ----
+for b in "${bands[@]}"; do
+    for ((c=2; c<=COLS; c++)); do
+        L=$((COLS - c + 1)); R=1
+        focus_addr "$b"
+        layoutmsg "preselect r"
+        exec_cmd "$CMD"
+        adj 0 "$L" "$R"
+    done
+done
+
+hyprctl eval 'hl.config({ input = { follow_mouse = 1 } })' >/dev/null

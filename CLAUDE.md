@@ -6,59 +6,66 @@ Bash scripts that spawn literal N×M tiled terminal grids in Hyprland via dwindl
 
 ## Key Architecture
 
-- **`grid`** — core engine. No `order()` or `leaf[]` tracking needed: always split position 0 (leftmost/topmost window). After `resizeactive`, focus returns to pos 0 — zero navigation.
-- **`grid-ssh`** — same algorithm + auto-balanced grid dimensions (prioritize fewest empty cells, then closest to 16:9).
+- **`grid`** — core engine. Bands-first build: ROWS equal full-width bands, then COLS equal columns per band. Focus tracked by window address.
+- **`grid-ssh`** — same build + per-cell spawn commands. Auto-balanced dimensions (minimize empty cells, then closest to 16:9). Host *i* lands at row-major cell (`i/COLS`, `i%COLS`); cells past the host list spawn a plain terminal.
 - **`grid-rpc`/`grid-drpc`** — pipe hostnames from `$HOME/.ssh/hosts` to grid-ssh.
 
-## Hyprland 0.55 Findings (DO NOT FORGET)
+## Hyprland 0.56 + Lua config (DO NOT FORGET)
 
-| Issue | Detail |
+The user runs **hyprland.lua**, not hyprlang. hyprctl is now Lua-evaluated — every legacy syntax breaks:
+
+| Legacy (0.55) | 0.56 replacement |
 |---|---|
-| `splitratio` | Removed. Use `resizeactive` with integer percentages. |
-| `misc:focus_on_activate` | Broken. New windows always steal focus. |
-| Decimal percentages | Ignored by `resizeactive`. Must use integers (e.g., `-33%` not `-33.3%`). |
-| Fraction resize | `resizeactive -0.33 0` does nothing. Only `%` works. |
-| Minimum sleep | `S=0.11` minimum. Fails at `S=0.10`. Default `S=0.15` (~30% margin). |
-| `activewindow.addr` | Always `null` in 0.55. Cannot track focus by address. |
-| `movefocus l` after resize | Broken (addr null, no effect). |
-| `movefocus r` wrap | Works from non-rightmost. From rightmost: unreliable after resize. |
-| Focus after resize | With `S≥0.11`: focus reliably on LEFT/TOP window after `resizeactive`. |
+| `hyprctl keyword …` | `hyprctl eval 'hl.config({…})'` (keyword fails: "use eval") |
+| `hyprctl dispatch exec "cmd"` | `hyprctl dispatch 'hl.dsp.exec_cmd("cmd")'` (runs via bash -c) |
+| `dispatch layoutmsg "preselect r"` | `hl.dsp.layout("preselect r")` / `"preselect d"` |
+| `dispatch movefocus r` | `hl.dsp.focus({ direction = "right" })` |
+| focus by window | `hl.dsp.focus({ window = "address:0x…" })` — **must** prefix `address:`; bare `0x…` or `{window="0x…"}` → "window not found" |
+| `dispatch resizeactive "-33%" 0` | `hl.dsp.window.resize({ x = <pixels>, y = <pixels>, relative = true })` |
 
-## Algorithm (zero-navigation)
+Dispatch semantics to remember:
+
+- Any bare word in a dispatch is parsed as Lua → `')' expected near 'X'`. All strings must be quoted (helper `lua_str`). A dispatch is just `hl.dispatch(<your-lua-expr>)`.
+- `window.resize` numeric args **without** `relative` are ABSOLUTE sizes (negative → "Invalid size"). With `relative = true` it drags the split border by a pixel delta; positive shrinks the freshly-spawned right/bottom child. 0.55's integer-percent behavior is gone — deltas are computed in px.
+- **Focus does NOT auto-return to pos 0 after a resize** (unlike 0.55 `resizeactive`). You must `focus({window="address:…"})` the persistent seed/band window before every split.
+- Minimum sleep after a dispatch: `S=0.11`; the rewritten scripts use `S=0.22`.
+
+## Equal-grid build (validated 2×2…5×3, 6×6; ≤3px on 0.56.2)
 
 ```bash
-# Always split position 0 (leftmost/topmost).
-# L = N - c + 1 (remaining in first window), R = 1.
-# After resizeactive, focus returns to pos 0.
-for ((c=2; c<=N; c++)); do
-    L=$((N - c + 1)); R=1
-    layoutmsg preselect r
-    exec "$CMD"; sleep "$S"
-    resizeactive (shrinks right window so left = L/(L+R))
-done
+# dpct = (2R/(L+R) - 1)*100   (negative)
+# delta = round(size * -dpct / 100)   -- width for columns, height for rows
+#   ROWS bands: split seed downward ROWS-1 times -> equal bands
+#   then per band: split rightward COLS-1 times    -> equal columns
+# refocus the seed / band window by address before EVERY split.
 ```
 
-All N columns/rows end up at exactly 1/N of total. Works for any N.
+**Split↔visual-cell mapping** (deterministic; dwindle nests left) — a split with remaining count `L` puts its new window at visual index `L`:
+
+- band split `r` (2..ROWS) → cell row `ROWS - r + 1`, col 0. Creation fills rows `0, ROWS-1, …, 1`.
+- column split `c` (2..COLS) within band row → cell col `COLS - c + 1`. Creation fills cols `0, COLS-1, …, 1`.
+- Full creation order: seed `(0,0)`; bands `r=2..ROWS`; then per band (in creation order) columns `c=2..COLS`.
+- grid-ssh precomputes this as a per-spawn command array and advances a pointer (`next_cmd`) so host *i* is placed at row-major cell *i*.
 
 ## Bash Pitfalls
 
+- **`$()` runs in a subshell — mutations are lost.** `next_cmd(){ sp=$((sp+1)); echo …; }` used as `"$(next_cmd)"` never advances `sp` (every window got cmds[0]). Advance a global inside a plain call, then read the variable.
 - **`local` in bash shadows variables in called functions.** `build_dim` uses `local N` which overrides the global `N` (host count) inside `spawn()`. Rename to `local count`.
 - **`1e9` not valid in bash arithmetic.** Use `999999` instead.
 - **`replace_all` with `sed` is dangerous** — `S=1` → `S=0.15` also hit `ROWS=1` → `ROWS=0.15`.
+- lua strings: escape `\` then `"` (helper `lua_str`).
 
 ## Working Rules
 
-- `S` is configurable at script top. Default: `0.15`.
+- `S` configurable at script top. Current default: `0.22`.
 - Every `hyprctl dispatch` must have `sleep "$S"` after it. No exceptions.
 - Windows are tiled — never use `[float]` rules.
 - Grid runs on current workspace. Aborts if non-floating windows exist.
-- Test via `/tmp/grid-run.sh` (never edit, saves ws, switches to 6, cleans, runs test, screenshots, returns) + `/tmp/grid-test.sh` (edit this, defines what to run).
-- Only workspace 6 for testing. Kill everything there before each test.
-- Return to original workspace immediately after screenshot.
-- `input:follow_mouse` must be 0 during build, restored to 1 after.
-- `dwindle:force_split 2`, `preserve_split true`, `default_split_ratio 1`.
+- Test on workspace 6 only; kill everything there before each test; return to original workspace immediately. Existing `/tmp` harnesses (`hgmap.sh` for creation→cell mapping, `tsgr.sh`-style for grid-ssh placement) show the pattern: save orig ws, `follow_mouse=0` during build / `=1` after, trap-restore.
+- `input.follow_mouse` must be 0 during build, restored to 1 after (via `hyprctl eval 'hl.config({…})'`).
+- `hl.dsp.exec_cmd` runs the string through `bash -c` → grid-ssh can pass `alacritty --command ssh <host>` unquoted.
 
 ## Tested Layouts
 
-2×2, 3×2, 4×2, 5×2, 3×3, 6×6 — all equal within 5px.
+2×2, 2×3, 3×2, 3×3, 4×2, 4×4, 5×3, 6×6 — equal within 5px. grid-ssh 3×2 host placement verified by window title (host *i* at row-major cell *i*).
 

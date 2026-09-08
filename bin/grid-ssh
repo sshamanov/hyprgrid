@@ -2,11 +2,15 @@
 #   grid-ssh – spawn one SSH terminal per host in a balanced grid
 #   usage:  grid-ssh host1 host2 …
 #
-#   Dwindle tree manipulation, same approach as grid.
+#   Hyprland 0.56 (Lua config).  Same Lua dispatch/eval API as `grid`, same
+#   equal-grid build: ROWS full-width bands, then COLS columns inside each band.
+#
+#   Host i is placed at visual row-major cell (i / COLS, i % COLS) — top-left
+#   first.  Cells beyond the host count get a plain terminal.
 #   Grid dimensions auto-chosen to stay close to 16:9.
 
 TERM=alacritty
-S=0.15
+S=0.22
 TARGET_RATIO=1.7777778     # 16/9
 
 HOSTS=("$@"); N=${#HOSTS[@]}
@@ -18,6 +22,7 @@ Usage: grid-ssh HOST...
 Spawn one tiled alacritty terminal per host, each running an SSH session.
 Grid dimensions chosen automatically to stay close to 16:9 while
 minimizing empty panes.  Empty panes get a plain terminal.
+Hosts are placed top-left to bottom-right, left to right.
 
 Examples:
   grid-ssh web1 web2 web3
@@ -26,36 +31,15 @@ EOF
     ((N==0)) && exit 1; exit 0
 }
 
-adj() {
-    local dim=$1 L=$2 R=$3 dpct
-    dpct=$(awk -v L="$L" -v R="$R" 'BEGIN{printf "%.0f", (2*R/(L+R)-1)*100}')
-    if (( $(awk -v d="$dpct" 'BEGIN{print (d<-0.5?1:0)}') )); then
-        ((dim==0)) && hyprctl dispatch resizeactive "${dpct}%" 0 \
-                    || hyprctl dispatch resizeactive 0 "${dpct}%"
-    fi
-}
+lua_str() { local s=$1; s=${s//\\/\\\\}; s=${s//\"/\\\"}; printf '"%s"' "$s"; }
+dsp() { hyprctl dispatch "$1" >/dev/null; }
 
-build_dim() {
-    local count=$1 dim=$2 presel
-    ((dim==0)) && presel=r || presel=d
+exec_cmd()   { dsp "hl.dsp.exec_cmd($(lua_str "$1"))"; sleep "$S"; }
+layoutmsg()  { dsp "hl.dsp.layout($(lua_str "$1"))"; sleep "$S"; }
+focus_addr() { dsp "hl.dsp.focus({ window = \"address:$1\" })"; sleep "$S"; }
+resize_rel() { dsp "hl.dsp.window.resize({ x = $1, y = $2, relative = true })"; sleep "$S"; }
 
-    for ((c=2; c<=count; c++)); do
-        local L=$((count - c + 1)) R=1
-        hyprctl dispatch layoutmsg "preselect $presel"; sleep "$S"
-        spawn; sleep "$S"
-        adj "$dim" "$L" "$R"; sleep "$S"
-    done
-}
-
-spawn() {
-    if (( idx < N )); then
-        printf -v host_q '%q' "${HOSTS[$idx]}"
-        hyprctl dispatch exec "$TERM --command ssh $host_q"
-    else
-        hyprctl dispatch exec "$TERM"
-    fi
-    ((idx++))
-}
+active_info() { hyprctl -j activewindow | jq -r '"\(.size[0]) \(.size[1]) \(.address)"'; }
 
 # ---- choose COLS × ROWS ----
 best_diff=999999; best_unused=999999; ROWS=1; COLS=$N
@@ -79,19 +63,83 @@ if (( TILED > 0 )); then
     exit 1
 fi
 
-hyprctl keyword dwindle:force_split 2
-hyprctl keyword dwindle:preserve_split true
-hyprctl keyword dwindle:default_split_ratio 1
-hyprctl keyword input:follow_mouse 0
+# command for the cell with row-major index hi ("" past the host list = plain)
+cell_cmd() {
+    local hi=$1
+    if (( hi < N )); then
+        printf '%s --command ssh %s' "$TERM" "${HOSTS[$hi]}"
+    else
+        printf '%s' "$TERM"
+    fi
+}
 
-# ---- build ----
-idx=0
-spawn; sleep "$S"
-build_dim "$COLS" 0
+# ---- creation-order cell list -> per-step command array ----
+# Split with remaining count L puts the new window at visual index L of that
+# dimension.  band split r -> row ROWS-r+1 ; column split c -> col COLS-c+1.
+# Creation order: seed(0,0); bands r=2..ROWS (rows ROWS-1..1, col 0); then for
+# every band row (0, ROWS-1..1) the columns c=2..COLS.
+declare -a rows_seq=(0)
+for ((r=2; r<=ROWS; r++)); do rows_seq+=($((ROWS - r + 1))); done
 
-for ((col=0; col<COLS; col++)); do
-    ((ROWS>1)) && build_dim "$ROWS" 1
-    ((col+1<COLS)) && { hyprctl dispatch movefocus r; sleep "$S"; }
+declare -a cmds=()
+add_cell() { # row col
+    local hi=$(( $1 * COLS + $2 ))
+    cmds+=("$(cell_cmd "$hi")")
+}
+add_cell 0 0
+for ((i=1; i<${#rows_seq[@]}; i++)); do add_cell "${rows_seq[i]}" 0; done
+for rb in "${rows_seq[@]}"; do
+    for ((c=2; c<=COLS; c++)); do add_cell "$rb" $((COLS - c + 1)); done
 done
 
-hyprctl keyword input:follow_mouse 1
+# follow_mouse off during the build; restored at end.
+hyprctl eval 'hl.config({ input = { follow_mouse = 0 } })' >/dev/null
+
+# advance the per-spawn command pointer.  NOT via $() substitution — that runs
+# in a subshell and the increment would be lost.  Call next_cmd, then read $cur.
+sp=0; cur=
+next_cmd() { cur=${cmds[$sp]}; sp=$((sp+1)); }
+
+adj() {
+    local dim=$1 L=$2 R=$3 w h addr delta dpct
+    read -r w h addr <<<"$(active_info)"
+    dpct=$(awk -v L="$L" -v R="$R" 'BEGIN{printf "%.1f", (2*R/(L+R)-1)*100}')
+    if awk -v d="$dpct" 'BEGIN{exit !(d < -0.5)}'; then
+        if (( dim == 0 )); then
+            delta=$(awk -v s="$w" -v d="$dpct" 'BEGIN{printf "%.0f", s*(-d)/100}')
+            resize_rel "$delta" 0
+        else
+            delta=$(awk -v s="$h" -v d="$dpct" 'BEGIN{printf "%.0f", s*(-d)/100}')
+            resize_rel 0 "$delta"
+        fi
+    fi
+}
+
+# ---- seed (top-left cell) ----
+next_cmd; exec_cmd "$cur"
+seed=$(hyprctl -j activewindow | jq -r '.address')
+[[ $seed == null || -z $seed ]] && { echo "grid-ssh: no active window after seed spawn" >&2; exit 1; }
+
+# ---- 1) ROWS equal full-width bands ----
+bands=("$seed")
+for ((r=2; r<=ROWS; r++)); do
+    L=$((ROWS - r + 1)); R=1
+    focus_addr "$seed"
+    layoutmsg "preselect d"
+    next_cmd; exec_cmd "$cur"
+    bands+=("$(hyprctl -j activewindow | jq -r '.address')")
+    adj 1 "$L" "$R"
+done
+
+# ---- 2) within each band, COLS equal columns ----
+for b in "${bands[@]}"; do
+    for ((c=2; c<=COLS; c++)); do
+        L=$((COLS - c + 1)); R=1
+        focus_addr "$b"
+        layoutmsg "preselect r"
+        next_cmd; exec_cmd "$cur"
+        adj 0 "$L" "$R"
+    done
+done
+
+hyprctl eval 'hl.config({ input = { follow_mouse = 1 } })' >/dev/null

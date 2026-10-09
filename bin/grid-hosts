@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+#   grid-hosts – SSH grid for the Host aliases in an ssh config that match a regex
+#   usage:  grid-hosts [-n] PATTERN [FILE]
+#
+#   Reads `Host` lines from FILE (default ~/.ssh/config), keeps aliases matching
+#   PATTERN (awk ERE), skips wildcard aliases, sorts them and hands them to
+#   grid-ssh.  -n prints the matched hosts instead of spawning the grid.
+
+[[ $1 == --help || $1 == -h ]] && {
+    cat <<'EOF'
+Usage: grid-hosts [-n] PATTERN [FILE]
+
+Spawn a grid-ssh grid for every Host alias in FILE matching PATTERN.
+
+Arguments:
+  PATTERN  awk extended regex matched against each Host alias
+  FILE     ssh config file to read (default: ~/.ssh/config)
+  -n       list matching hosts only, don't spawn
+
+Examples:
+  grid-hosts '^web-'
+  grid-hosts -n 'db[0-9]$' ~/.ssh/config.d/prod
+EOF
+    exit 0
+}
+
+LIST=0
+[[ $1 == -n ]] && { LIST=1; shift; }
+
+PATTERN=$1
+FILE=${2:-$HOME/.ssh/config}
+[[ -n $PATTERN ]] || { echo "grid-hosts: PATTERN required (see --help)" >&2; exit 1; }
+[[ -r $FILE ]] || { echo "grid-hosts: cannot read $FILE" >&2; exit 1; }
+
+mapfile -t HOSTS < <(
+    awk -v pat="$PATTERN" '
+        /^[[:space:]]*#/ { next }
+        tolower($1) == "host" {
+            for (i = 2; i <= NF; i++)
+                if ($i !~ /[*?!]/ && $i ~ pat) print $i
+        }' "$FILE" | sort -u
+)
+
+(( ${#HOSTS[@]} )) || { echo "grid-hosts: no Host alias in $FILE matches '$PATTERN'" >&2; exit 1; }
+
+if (( LIST )); then
+    printf '%s\n' "${HOSTS[@]}"
+    exit 0
+fi
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+exec "$SCRIPT_DIR/grid-ssh" "${HOSTS[@]}"

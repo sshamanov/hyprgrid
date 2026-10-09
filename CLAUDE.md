@@ -8,7 +8,7 @@ Bash scripts that spawn literal N×M tiled terminal grids in Hyprland via dwindl
 
 - **`grid`** — core engine. Bands-first build: ROWS equal full-width bands, then COLS equal columns per band. Focus tracked by window address.
 - **`grid-ssh`** — same build + per-cell spawn commands. Auto-balanced dimensions (minimize empty cells, then closest to 16:9). Host *i* lands at row-major cell (`i/COLS`, `i%COLS`); cells past the host list spawn a plain terminal.
-- **`grid-rpc`/`grid-drpc`** — pipe hostnames from `$HOME/.ssh/hosts` to grid-ssh.
+- **`grid-hosts`** — `grid-hosts [-n] PATTERN [FILE]`: Host aliases from an ssh config (default `~/.ssh/config`) matching an awk regex → grid-ssh. Only `Host` lines are read, wildcard aliases skipped, output sorted; `-n` lists without spawning. Personal host groups live in private wrappers outside the repo — never hardcode inventories or hostnames here.
 
 ## Hyprland 0.56 + Lua config (DO NOT FORGET)
 
@@ -30,7 +30,7 @@ Dispatch semantics to remember:
 - `window.resize` numeric args **without** `relative` are ABSOLUTE sizes (negative → "Invalid size"). With `relative = true` it drags the split border by a pixel delta; positive shrinks the freshly-spawned right/bottom child. 0.55's integer-percent behavior is gone — deltas are computed in px.
 - **Focus does NOT auto-return to pos 0 after a resize** (unlike 0.55 `resizeactive`). You must `focus({window="address:…"})` the persistent seed/band window before every split.
 - **Pacing — no fixed sleeps.** `focus`/`preselect` are synchronous and need no wait. Only two steps are genuinely async, and both are **polled adaptively**: after `exec` wait for the window to map + grab focus (`wait_map`), after `window.resize` wait until geometry is stable across two reads (`wait_stable`). Set `animations.enabled=false` for the build so sizes snap (a fixed sleep was only needed to out-wait open animations). ~4× faster: 3×3 in ~1.9 s, 4×4 ~3.4 s, 6×6 ~8 s, geometry ≤3px.
-- **Restore config-file values, never live ones.** On exit the scripts re-apply the `input:follow_mouse` / `animations.enabled` values *parsed from `hyprland.lua`/`hyprland.conf`* (with Hyprland built-in defaults as fallback), via a `trap`. Do NOT snapshot with `getoption` and restore that: another tool or an interrupted run can mutate the live value, and restoring it would cement the drift (a `/tmp` harness once left `animations.enabled=true` live, then scripts kept re-applying `true` even though the config says `false`). Parsing keeps the end state deterministic and self-healing.
+- **Restore config-file values, never live ones.** On exit the scripts re-apply the `input:follow_mouse` / `animations.enabled` values *parsed from `hyprland.lua`/`hyprland.conf`* (with Hyprland built-in defaults as fallback), via a `trap`. Do NOT snapshot with `getoption` and restore that: another tool or an interrupted run can mutate the live value, and restoring it would cement the drift (a test harness once left `animations.enabled=true` live, then scripts kept re-applying `true` even though the config says `false`). Parsing keeps the end state deterministic and self-healing.
 
 ## Equal-grid build (validated 2×2…5×3, 6×6; ≤3px on 0.56.2)
 
@@ -62,8 +62,8 @@ Dispatch semantics to remember:
 - No fixed sleeps. Sync ops (`focus`, `preselect`) are un-paced; async ops are adaptively polled (`wait_map` after exec, `wait_stable` after resize). Keep the generous poll caps as a safety net.
 - Windows are tiled — never use `[float]` rules.
 - Grid runs on current workspace. Aborts if non-floating windows exist.
-- Test on workspace 6 only; kill everything there before each test; return to original workspace immediately. Existing `/tmp` harnesses (`hgmap.sh` for creation→cell mapping, `tsgr.sh`-style for grid-ssh placement) show the pattern: save orig ws, `follow_mouse=0` during build / `=1` after, trap-restore.
-- `input.follow_mouse` must be 0 during build, restored to 1 after (via `hyprctl eval 'hl.config({…})'`).
+- Test on workspace 6 only; kill everything there before each test; return to original workspace immediately. Test harnesses are throwaway scripts (keep them out of the repo): save the original workspace, close all ws6 windows on exit, then restore it. Check grid-ssh placement by spawning `alacritty --title HOST<i>` instead of ssh and reading titles from `hyprctl -j clients`.
+- `input.follow_mouse` must be 0 during build, restored to the config-file value after (via `hyprctl eval 'hl.config({…})'`).
 - `hl.dsp.exec_cmd` runs the string through `bash -c` → grid-ssh can pass `alacritty --command ssh <host>` unquoted.
 
 ## Tested Layouts

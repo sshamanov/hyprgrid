@@ -9,29 +9,22 @@ Hyprland scripts for spawning tiled terminal grids — literal N×M matrices of 
 ```
 bin/
 ├── grid          # core: N×M identical terminals
-├── grid-ssh      # SSH grid: auto-balanced to ~16:9
-├── grid-rpc      # wrapper: example-rpc-* hosts → grid-ssh
-└── grid-drpc     # wrapper: *.drpc hosts → grid-ssh
+├── grid-ssh      # SSH grid: one host per cell, auto-balanced to ~16:9
+└── grid-hosts    # SSH grid for ssh-config Host aliases matching a regex
 ```
-
-All spawn logic lives in `grid`. `grid-ssh` wraps it with host→SSH-command transformation and automatic grid dimension selection.
 
 ## How it works
 
-1. **Prep:** verify current workspace is empty (no tiled windows), set dwindle options:
-   - `force_split 2` — always split right/bottom
-   - `preserve_split true` — keep direction after resize
-   - `focus_on_activate` broken in Hyprland 0.55, so focus stays on new window
-2. **Build columns:** seed first window, then repeatedly split the leftmost window.
-   After each split, `resizeactive` shrinks the right window so the left section spans (N-1)/N of the total — all N columns are equal width.
-3. **Build rows:** for each column, split the top window repeatedly — all rows equal height.
-4. **Restore** `input:follow_mouse`.
+Requires Hyprland 0.56 with a Lua config — all `hyprctl` calls use the `hl.dsp.*` / `hl.config` API.
 
-No focus navigation needed — after `resizeactive`, focus returns to the left/top window naturally.
+1. **Prep:** abort unless the current workspace has no tiled windows; disable `input.follow_mouse` and `animations.enabled` for the build.
+2. **Bands:** spawn a seed window, then split it downward ROWS-1 times. After each split the new bottom window is shrunk with a relative `window.resize` so all ROWS bands end up equal height.
+3. **Columns:** split every band rightward COLS-1 times the same way, so all COLS columns end up equal width.
+4. **Restore** `follow_mouse` / `animations.enabled` to the values declared in `hyprland.lua` (also on Ctrl-C).
 
-Default sleep between actions: `S=0.15` seconds (minimum safe value for Hyprland 0.55; fails at ≤0.10 on 6×6).
+Focus is tracked by window address. There are no fixed sleeps: the scripts poll for each new window to map and for the geometry to settle after a resize. A 3×3 grid builds in about 2 s.
 
-Tested layouts: 2×2, 3×2, 4×2, 5×2, 3×3, 6×6 — all equal within 5px.
+Tested layouts: 2×2, 2×3, 3×2, 3×3, 3×5, 4×2, 4×4, 5×3, 6×6 — all equal within 5px.
 
 ## Scripts
 
@@ -47,21 +40,25 @@ grid 4 3 "alacritty -e htop"
 
 ### `grid-ssh HOST...`
 
-One SSH terminal per host. Grid dimensions auto-chosen to stay close to 16:9. Empty panes get a plain terminal.
+One SSH terminal per host, placed left to right, top to bottom. Grid dimensions are chosen to minimize empty cells, then to stay close to 16:9. Empty cells get a plain terminal.
 
-### `grid-rpc` / `grid-drpc`
+### `grid-hosts [-n] PATTERN [FILE]`
 
-Read hosts from `$HOME/.ssh/hosts`, filter by pattern, pipe to `grid-ssh`.
+Collects the `Host` aliases in an ssh config file (default `~/.ssh/config`) that match the awk regex `PATTERN`, skipping wildcard aliases, and opens them with `grid-ssh`. `-n` only lists the matches.
+
+```bash
+grid-hosts '^web-'
+grid-hosts -n 'db[0-9]$' ~/.ssh/config.d/prod
+```
+
+For a fixed host group, wrap it in a private script or alias outside the repo:
+
+```bash
+alias grid-web="grid-hosts '^web-' ~/.ssh/config.d/web"
+```
 
 ## Requirements
 
-- Hyprland ≥ 0.55, `hyprctl`, `jq`, `awk`
-- `alacritty` (default), `ssh` (grid-ssh)
-- Configurable: set `S` (sleep) at top of scripts. Runs on current workspace — must be empty (no tiled windows).
-
-## Testing
-
-```bash
-bash /tmp/grid-run.sh    # wrapper: ws save/restore, run test, screenshot
-bash /tmp/grid-test.sh   # test logic — edit this
-```
+- Hyprland ≥ 0.56 with a Lua config, `hyprctl`, `jq`, `awk`
+- `alacritty` (default), `ssh` (grid-ssh, grid-hosts)
+- Run on an empty workspace (no tiled windows).
